@@ -53,23 +53,28 @@ pub trait EvmTypesHost: Sized + 'static {
     /// Host type used by this EVM.
     type Host<'a>: Host<Self> + ?Sized;
 
-    /// Runs for every message right after its rollback checkpoint is taken, before the message's
-    /// own setup writes (value transfer, account creation). Writes made before the checkpoint,
-    /// such as a create's destination warming and its nested creator's nonce bump, belong to the
-    /// caller.
+    /// Runs for every message once its setup writes (value transfer, account creation) are done,
+    /// right before its code or precompile runs. Journal entries before `checkpoint` belong to the
+    /// caller, such as a create's destination warming and its nested creator's nonce bump; later
+    /// ones are the message's setup writes.
     ///
-    /// Messages that fail before taking a checkpoint (call depth, create pre-access checks) and
-    /// messages replaced by a halted result run neither this hook nor [`Self::message_end`].
+    /// Returning `Some(stop)` fails the message without running it. `stop` must not be a success
+    /// stop: the message's state rolls back to `checkpoint` and it returns its gas as for any
+    /// result with that stop. [`Self::message_end`] still runs.
+    ///
+    /// Messages that fail before or during setup (call depth, create pre-access checks, a failed
+    /// value transfer or account creation) and messages replaced by a halted result run neither
+    /// this hook nor [`Self::message_end`].
     #[inline(always)]
-    fn message_checkpoint(
+    fn message_start(
         _host: &mut Self::Host<'_>,
         _message: &Message<Self>,
         _checkpoint: &StateCheckpoint,
-    ) -> Result<(), ExecutionError> {
-        Ok(())
+    ) -> Result<Option<InstrStop>, ExecutionError> {
+        Ok(None)
     }
 
-    /// Runs for every message that ran [`Self::message_checkpoint`], once its result is final:
+    /// Runs for every message that ran [`Self::message_start`], once its result is final:
     /// a failed message's state is already rolled back to `checkpoint`. Runs before inspector
     /// `call_end` / `create_end` hooks, which observe the hook's decision.
     ///
