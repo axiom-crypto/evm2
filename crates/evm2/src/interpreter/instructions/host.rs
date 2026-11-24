@@ -119,15 +119,21 @@ pub fn tstore(cx: _, [key, value]: [Word]) -> Result {
 
 #[instruction(no_stack_preamble, dynamic_gas)]
 pub fn log<const N: usize>(cx: _) -> Result {
-    log_common(cx, stack, N)
+    log_with(cx, stack, N)
 }
 
+/// Executes `LOG0` through `LOG4`, with `n` topics.
+///
+/// This is the body of [`log`], for custom `LOG` instructions that need extra behavior after the
+/// log is emitted. Use it from an `#[instruction(no_stack_preamble, dynamic_gas)]` function with
+/// `cx` and `stack`.
 #[inline(never)]
-fn log_common<T: EvmTypesHost>(
+pub fn log_with<T: EvmTypesHost>(
     cx: GasInstructionCx<'_, '_, '_, T>,
     mut stack: StackMut<'_>,
     n: usize,
 ) -> Result {
+    assert!(n <= 4, "LOG takes at most four topics");
     require_non_staticcall(cx.state)?;
     let [offset, len] = stack.popn()?;
     let len = len.to_usize()?;
@@ -147,7 +153,7 @@ fn log_common<T: EvmTypesHost>(
     }
     let destination = &cx.state.message().destination;
     let (memory, host) = cx.state.0.memory_host();
-    // SAFETY: `log` is only dispatched for LOG0 through LOG4.
+    // SAFETY: `n` is at most four.
     host.log(
         destination,
         unsafe { topics.get_unchecked(..n) }.into(),
