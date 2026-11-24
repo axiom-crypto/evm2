@@ -1760,8 +1760,8 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         Ok(self.finish_call_message_run(checkpoint, stop))
     }
 
-    /// Applies [`EvmTypesHost::message_start`](crate::EvmTypesHost::message_start). A message the
-    /// hook fails ends without running, after its state rolls back to `checkpoint`.
+    /// Applies [`EvmTypesHost::message_start`]. A message the hook fails ends without running,
+    /// after its state rolls back to `checkpoint`.
     #[inline(always)]
     fn start_message(
         &mut self,
@@ -1777,8 +1777,7 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         self.end_message(message, checkpoint.clone(), result).map(Some)
     }
 
-    /// Applies [`EvmTypesHost::message_end`](crate::EvmTypesHost::message_end) to a message
-    /// result whose state is already settled.
+    /// Applies [`EvmTypesHost::message_end`] to a message result whose state is already settled.
     ///
     /// The hook sees gas settled for the result's stop; a stop it replaces is settled again by
     /// [`Self::execute_message_impl`].
