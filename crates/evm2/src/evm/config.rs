@@ -53,19 +53,15 @@ pub trait EvmTypesHost: Sized + 'static {
     /// Host type used by this EVM.
     type Host<'a>: Host<Self> + ?Sized;
 
-    /// Runs for every message once its setup writes (value transfer, account creation) are done,
-    /// right before its code or precompile runs. Journal entries before `checkpoint` belong to the
-    /// caller, such as a create's destination warming and its nested creator's nonce bump; later
-    /// ones are the message's setup writes.
+    /// Called once a message's value transfer or account creation is done, right before its code
+    /// or precompile runs. Journal entries before `checkpoint` belong to the caller.
     ///
-    /// Returning `Some(stop)` fails the message without running it. `stop` must be a revert or
-    /// halt stop other than [`InstrStop::FatalExternalError`] (return an [`ExecutionError`] to
-    /// abort execution instead): the message's state rolls back to `checkpoint` and it returns its
-    /// gas as for any result with that stop. [`Self::message_end`] still runs.
+    /// Returning `Some(stop)` fails the message without running it and rolls its state back to
+    /// `checkpoint`; [`Self::message_end`] still runs. `stop` must be a revert or a halt other
+    /// than [`InstrStop::FatalExternalError`]; return an [`ExecutionError`] to abort instead.
     ///
-    /// Messages that fail before or during setup (call depth, create pre-access checks, a failed
-    /// value transfer or account creation) and messages replaced by a halted result run neither
-    /// this hook nor [`Self::message_end`].
+    /// Not called for a message that fails before or during setup, or is replaced by a halted
+    /// result.
     #[inline(always)]
     fn message_start(
         _host: &mut Self::Host<'_>,
@@ -75,17 +71,13 @@ pub trait EvmTypesHost: Sized + 'static {
         Ok(None)
     }
 
-    /// Runs for every message that ran [`Self::message_start`], once its result is final:
-    /// a failed message's state is already rolled back to `checkpoint`, and the result's gas is
-    /// settled for its stop. Runs before inspector `call_end` / `create_end` hooks, which observe
-    /// the hook's decision. An [`ExecutionError`] from the message, including one returned by
-    /// [`Self::message_start`], aborts execution without running this hook.
+    /// Called with the final result of a message that ran [`Self::message_start`], before the
+    /// inspector's `call_end` or `create_end`. Not called if the message aborts with an
+    /// [`ExecutionError`].
     ///
-    /// Returning `Some(stop)` fails a successful message with `stop`, which must be a revert or
-    /// halt stop other than [`InstrStop::FatalExternalError`] (return an [`ExecutionError`] to
-    /// abort execution instead): its state rolls back to `checkpoint`, its gas is settled for
-    /// `stop`, and its output and created address are cleared. The hook must return `None` for a
-    /// message that already failed.
+    /// Returning `Some(stop)` fails a successful message, rolling its state back to `checkpoint`
+    /// and clearing its output. `stop` follows the rules of [`Self::message_start`]. Must return
+    /// `None` for a message that already failed.
     #[inline(always)]
     fn message_end(
         _host: &mut Self::Host<'_>,

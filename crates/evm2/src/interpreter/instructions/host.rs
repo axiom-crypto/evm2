@@ -120,17 +120,11 @@ pub fn log<const N: usize>(cx: _) -> Result {
     log_with(cx.gas, cx.state, stack, N, |_, _, _| ())
 }
 
-/// Executes `LOG0` through `LOG4`, with `n` topics.
+/// Executes `LOG0` through `LOG4` with `n` topics.
 ///
-/// This is the body of [`log`], for custom `LOG` instructions that need extra behavior. Use it
-/// from an `#[instruction(no_stack_preamble, dynamic_gas)]` function with `cx.gas`, `cx.state`,
-/// and `stack`.
-///
-/// `on_log` receives the log the host emits: the emitting address, the topics, and the data, which
-/// borrows the frame's memory. It runs only for a log that is emitted, and its return value is
-/// returned from `log_with` once the host has emitted the log. Behavior that needs the host or the
-/// interpreter state, such as charging for the log or failing through [`InterpreterState::fail`],
-/// runs on that value after `log_with` returns.
+/// This is the body of [`log`], for custom `LOG` instructions. `on_log` receives the emitting
+/// address, the topics and the data before the host emits the log, and `log_with` returns its
+/// result. Work that needs the host or the interpreter state uses that result afterwards.
 #[inline(never)]
 pub fn log_with<T: EvmTypesHost, R>(
     gas: &mut Gas,

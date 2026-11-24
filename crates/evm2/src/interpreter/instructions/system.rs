@@ -561,9 +561,8 @@ pub fn selfdestruct(cx: _, [target]: [Word]) -> Result {
 
 /// Executes `SELFDESTRUCT` toward `target`.
 ///
-/// This is the body of [`selfdestruct`], for custom `SELFDESTRUCT` instructions that need extra
-/// behavior after the destruction. Use it from an `#[instruction(dynamic_gas)]` function with
-/// `cx.gas` and `cx.state`. It returns `Err(InstrStop::SelfDestruct)` on success.
+/// This is the body of [`selfdestruct`], for custom `SELFDESTRUCT` instructions. Returns
+/// `Err(InstrStop::SelfDestruct)` on success.
 #[inline(always)]
 pub fn selfdestruct_with<T: EvmTypesHost>(
     gas: &mut Gas,
