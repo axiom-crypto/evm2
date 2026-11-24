@@ -58,9 +58,10 @@ pub trait EvmTypesHost: Sized + 'static {
     /// caller, such as a create's destination warming and its nested creator's nonce bump; later
     /// ones are the message's setup writes.
     ///
-    /// Returning `Some(stop)` fails the message without running it. `stop` must not be a success
-    /// stop: the message's state rolls back to `checkpoint` and it returns its gas as for any
-    /// result with that stop. [`Self::message_end`] still runs.
+    /// Returning `Some(stop)` fails the message without running it. `stop` must be a revert or
+    /// halt stop other than [`InstrStop::FatalExternalError`] (return an [`ExecutionError`] to
+    /// abort execution instead): the message's state rolls back to `checkpoint` and it returns its
+    /// gas as for any result with that stop. [`Self::message_end`] still runs.
     ///
     /// Messages that fail before or during setup (call depth, create pre-access checks, a failed
     /// value transfer or account creation) and messages replaced by a halted result run neither
@@ -75,12 +76,16 @@ pub trait EvmTypesHost: Sized + 'static {
     }
 
     /// Runs for every message that ran [`Self::message_start`], once its result is final:
-    /// a failed message's state is already rolled back to `checkpoint`. Runs before inspector
-    /// `call_end` / `create_end` hooks, which observe the hook's decision.
+    /// a failed message's state is already rolled back to `checkpoint`, and the result's gas is
+    /// settled for its stop. Runs before inspector `call_end` / `create_end` hooks, which observe
+    /// the hook's decision. An [`ExecutionError`] from the message, including one returned by
+    /// [`Self::message_start`], aborts execution without running this hook.
     ///
-    /// Returning `Some(stop)` fails a successful message with `stop`, which must not be a success
-    /// stop: its state rolls back to `checkpoint`, and its output and created address are cleared.
-    /// The hook must return `None` for a message that already failed.
+    /// Returning `Some(stop)` fails a successful message with `stop`, which must be a revert or
+    /// halt stop other than [`InstrStop::FatalExternalError`] (return an [`ExecutionError`] to
+    /// abort execution instead): its state rolls back to `checkpoint`, its gas is settled for
+    /// `stop`, and its output and created address are cleared. The hook must return `None` for a
+    /// message that already failed.
     #[inline(always)]
     fn message_end(
         _host: &mut Self::Host<'_>,
