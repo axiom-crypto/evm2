@@ -2737,6 +2737,28 @@ mod tests {
     }
 
     #[test]
+    fn message_start_hook_refuses_a_message_without_running_it() {
+        let precompile =
+            Precompile::new(HOOK_REFUSED, PrecompileId::custom("refused"), |_, _, _| {
+                panic!("the refused message ran");
+            });
+        let mut evm =
+            message_hook_evm(InMemoryDB::default(), PrecompileMap::from_precompiles([precompile]));
+        let mut message = MessageExt {
+            destination: HOOK_REFUSED,
+            call_target: HOOK_REFUSED,
+            code_address: HOOK_REFUSED,
+            gas_limit: 30_000,
+            ..Default::default()
+        };
+
+        let result = Host::execute_message(&mut evm, &mut message).unwrap();
+
+        assert_eq!(result.stop, InstrStop::Revert);
+        assert_eq!(result.gas.remaining(), 30_000, "a refused message returns all its gas");
+    }
+
+    #[test]
     fn stores_typed_evm_extension_state() {
         let mut evm = Evm::<ExtensionTestTypes>::new_with_ext(
             SpecId::OSAKA,

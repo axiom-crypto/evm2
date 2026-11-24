@@ -1518,13 +1518,18 @@ mod tests {
         assert_eq!(hooked.gas_refunded(), base.gas_refunded());
 
         // A failed destruction does not reach the custom behavior.
+        let static_message = MessageExt { kind: MessageKind::StaticCall, ..message };
+        let base = run_hooked(
+            RunConfig::new(selfdestruct_code(op::SELFDESTRUCT)).message(static_message.clone()),
+        );
         let mut host = TestHost::default();
         let hooked = run_hooked(
             RunConfig::new(selfdestruct_code(HOOKED_SELFDESTRUCT))
                 .host(&mut host)
-                .message(MessageExt { kind: MessageKind::StaticCall, ..message }),
+                .message(static_message),
         );
         assert_matches!(hooked.err, InstrStop::StateChangeDuringStaticCall);
         assert!(host.selfdestructs.is_empty());
+        assert_eq!(hooked.gas_remaining(), base.gas_remaining());
     }
 }
