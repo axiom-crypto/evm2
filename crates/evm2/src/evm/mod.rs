@@ -1760,8 +1760,7 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         Ok(self.finish_call_message_run(checkpoint, stop))
     }
 
-    /// Applies [`EvmTypesHost::message_start`]. A message the hook fails ends without running,
-    /// after its state rolls back to `checkpoint`.
+    /// Applies [`EvmTypesHost::message_start`].
     #[inline(always)]
     fn start_message(
         &mut self,
@@ -1777,9 +1776,7 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         self.end_message(message, checkpoint.clone(), result).map(Some)
     }
 
-    /// Applies [`EvmTypesHost::message_end`] to a message result whose state is already settled.
-    ///
-    /// The hook sees gas settled for the result's stop; a stop it replaces is settled again by
+    /// Applies [`EvmTypesHost::message_end`]. A replaced stop is settled again by
     /// [`Self::execute_message_impl`].
     #[inline(always)]
     fn end_message(
@@ -2320,9 +2317,7 @@ fn eip7708_transfer_log(from: &Address, to: &Address, value: &Word) -> Option<Lo
     ))
 }
 
-/// Checks that a message hook fails a message with a stop that a message can end with: a revert or
-/// halt other than [`InstrStop::FatalExternalError`], which a hook reports as an
-/// [`ExecutionError`] instead.
+/// Checks that a message hook fails a message with a stop it is allowed to return.
 #[track_caller]
 fn assert_hook_failure_stop(hook: &str, stop: InstrStop) {
     assert!(
