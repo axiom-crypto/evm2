@@ -72,8 +72,8 @@ pub trait EvmTypesHost: Sized + 'static {
     }
 
     /// Called with the final result of a message that ran [`Self::message_start`], before the
-    /// inspector's `call_end` or `create_end`. Not called if the message aborts with an
-    /// [`ExecutionError`].
+    /// inspector's `call_end` or `create_end`. Not called if executing the message, or
+    /// [`Self::message_start`], returns an [`ExecutionError`].
     ///
     /// Returning `Some(stop)` fails a successful message, rolling its state back to `checkpoint`
     /// and clearing its output. `stop` follows the rules of [`Self::message_start`]. Must return
