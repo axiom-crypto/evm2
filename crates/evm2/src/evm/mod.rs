@@ -1892,7 +1892,7 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         let Some(stop) = T::message_start(self, message, checkpoint)? else {
             return Ok(None);
         };
-        assert!(!stop.is_success(), "message_start must fail a message with a failure stop");
+        assert_hook_failure_stop("message_start", stop);
         self.state.rollback(checkpoint.clone(), self.features);
         let result = Self::error_message_result(stop, message.gas_limit, message.reservoir);
         self.end_message(message, checkpoint.clone(), result).map(Some)
@@ -1900,6 +1900,9 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
 
     /// Applies [`EvmTypesHost::message_end`](crate::EvmTypesHost::message_end) to a message
     /// result whose state is already settled.
+    ///
+    /// The hook sees gas settled for the result's stop; a stop it replaces is settled again by
+    /// [`Self::execute_message_impl`].
     #[inline(always)]
     fn end_message(
         &mut self,
@@ -1907,11 +1910,12 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         checkpoint: StateCheckpoint,
         mut result: MessageResult<T>,
     ) -> Result<MessageResult<T>, ExecutionError> {
+        result.gas.settle_gas(result.stop);
         let Some(stop) = T::message_end(self, message, &checkpoint, &result)? else {
             return Ok(result);
         };
         assert!(result.stop.is_success(), "message_end failed a message that already failed");
-        assert!(!stop.is_success(), "message_end must fail a message with a failure stop");
+        assert_hook_failure_stop("message_end", stop);
         self.state.rollback(checkpoint, self.features);
         result.stop = stop;
         result.output = Bytes::new();
@@ -2450,6 +2454,17 @@ fn eip7708_transfer_log(from: &Address, to: &Address, value: &Word) -> Option<Lo
         vec![EIP7708_TRANSFER_TOPIC, from.into_word(), to.into_word()],
         Bytes::from(value.to_be_bytes::<32>()),
     ))
+}
+
+/// Checks that a message hook fails a message with a stop that a message can end with: a revert or
+/// halt other than [`InstrStop::FatalExternalError`], which a hook reports as an
+/// [`ExecutionError`] instead.
+#[track_caller]
+fn assert_hook_failure_stop(hook: &str, stop: InstrStop) {
+    assert!(
+        !stop.is_success() && !matches!(stop, InstrStop::FatalExternalError | InstrStop::Reload),
+        "{hook} must fail a message with a revert or halt stop, not {stop:?}",
+    );
 }
 
 #[cfg(test)]
