@@ -43,7 +43,7 @@ pub fn sstore(cx: _, [key, value]: [Word]) -> Result {
 /// is charged. It receives the interpreter [`Gas`], the state, the destination address, and the
 /// [`SStore`] result of the write. It may charge gas through `Gas` or fail through
 /// [`InterpreterState::fail`] and return the error. An `Err` stops the instruction and skips the
-/// remaining charges. The JIT does not run the hook.
+/// remaining charges.
 #[inline(always)]
 pub fn sstore_with<T: EvmTypesHost>(
     gas: &mut Gas,
@@ -117,7 +117,7 @@ pub fn tstore(cx: _, [key, value]: [Word]) -> Result {
 
 #[instruction(no_stack_preamble, dynamic_gas)]
 pub fn log<const N: usize>(cx: _) -> Result {
-    log_with(cx.gas, cx.state, stack, N, |_, _, _, _| Ok(()))
+    log_with(cx.gas, cx.state, stack, N, |_, _, _| ())
 }
 
 /// Executes `LOG0` through `LOG4`, with `n` topics.
@@ -126,18 +126,19 @@ pub fn log<const N: usize>(cx: _) -> Result {
 /// from an `#[instruction(no_stack_preamble, dynamic_gas)]` function with `cx.gas`, `cx.state`,
 /// and `stack`.
 ///
-/// `after_log` runs right after the host emits the log, whether or not the host records it. It
-/// receives the host, the emitting address, the topics, and the data. It may fail through
-/// [`InterpreterState::fail`] and return the error, which stops the instruction. The JIT does not
-/// run the hook.
+/// `on_log` receives the log the host emits: the emitting address, the topics, and the data, which
+/// borrows the frame's memory. It runs only for a log that is emitted, and its return value is
+/// returned from `log_with` once the host has emitted the log. Behavior that needs the host or the
+/// interpreter state, such as charging for the log or failing through [`InterpreterState::fail`],
+/// runs on that value after `log_with` returns.
 #[inline(never)]
-pub fn log_with<'state, 'host, T: EvmTypesHost>(
+pub fn log_with<T: EvmTypesHost, R>(
     gas: &mut Gas,
-    state: &mut InterpreterState<'state, 'host, T>,
+    state: &mut InterpreterState<'_, '_, T>,
     mut stack: StackMut<'_>,
     n: usize,
-    after_log: impl FnOnce(&mut T::Host<'host>, &Address, &[B256], &[u8]) -> Result,
-) -> Result {
+    on_log: impl FnOnce(&Address, &[B256], &[u8]) -> R,
+) -> Result<R> {
     assert!(n <= 4, "LOG takes at most four topics");
     require_non_staticcall(state)?;
     let [offset, len] = stack.popn()?;
@@ -161,8 +162,10 @@ pub fn log_with<'state, 'host, T: EvmTypesHost>(
     // SAFETY: `n` is at most four.
     let topics = unsafe { topics.get_unchecked(..n) };
     let data = memory.slice(offset, len);
+    // `on_log` runs before the host call, which can run inspector code that resizes this memory.
+    let value = on_log(&destination, topics, data);
     host.log(&destination, topics.into(), data.into());
-    after_log(host, &destination, topics, data)
+    Ok(value)
 }
 
 #[cfg(test)]
