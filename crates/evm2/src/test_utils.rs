@@ -1,6 +1,6 @@
 use crate::{
-    BaseEvmConfigSelector, BaseEvmTypes, DatabaseError, EvmFeatures, EvmTypesHost, ExecutionConfig,
-    SpecId, TxResult, TxResultExt,
+    BaseEvmConfigSelector, BaseEvmTypes, DatabaseError, EvmConfig, EvmFeatures, EvmTypesHost,
+    ExecutionConfig, SpecId, TxResult, TxResultExt,
     bytecode::Bytecode,
     constants::CALL_DEPTH_LIMIT,
     env::{BlockEnv, BlockEnvExt, TxEnv, TxEnvExt},
@@ -358,6 +358,16 @@ pub(crate) fn test_host(block: BlockEnv<TestTypes>) -> TestHost {
 }
 
 pub(crate) fn run(config: RunConfig<'_>) -> TestInterpreter {
+    let execution_config = ExecutionConfig::for_base_spec::<BaseEvmConfigSelector>(config.spec_id);
+    run_in(config, execution_config)
+}
+
+/// Runs `config` with the instruction set of `C`, at `C::BASE_SPEC_ID`.
+pub(crate) fn run_with<C: EvmConfig<TestTypes>>(config: RunConfig<'_>) -> TestInterpreter {
+    run_in(config.spec(C::BASE_SPEC_ID), ExecutionConfig::for_config::<C>())
+}
+
+fn run_in(config: RunConfig<'_>, execution_config: ExecutionConfig<TestTypes>) -> TestInterpreter {
     let RunConfig { code, host, spec_id, tx_env, message, gas_limit, return_data } = config;
     let message = Message::<TestTypes> { code: legacy_bytecode(code), gas_limit, ..message };
     let mut inner = Interpreter::<TestTypes>::new(&message);
@@ -366,7 +376,7 @@ pub(crate) fn run(config: RunConfig<'_>) -> TestInterpreter {
     let host = host.unwrap_or(&mut default_host);
     host.tx_env = tx_env;
     host.spec_id = spec_id;
-    host.execution_config = ExecutionConfig::for_base_spec::<BaseEvmConfigSelector>(spec_id);
+    host.execution_config = execution_config;
     let (err, execution_error) = match inner.run(host) {
         Ok(stop) => (stop, None),
         Err(error) => (InstrStop::FatalExternalError, Some(error)),

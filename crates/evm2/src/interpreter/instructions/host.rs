@@ -170,14 +170,16 @@ pub fn log_with<T: EvmTypesHost, R>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
-        SpecId,
+        BaseEvmConfig, EvmConfig, SpecId,
         interpreter::{InstrStop, MessageExt, MessageKind, Word, op},
         storage_key::StorageKey,
-        test_utils::{RunConfig, TestHost, push, run},
+        test_utils::{RunConfig, TestHost, TestTypes, push, push_all, run, run_with},
+        version::OpcodeConfig,
     };
     use alloc::vec::Vec;
-    use alloy_primitives::{Address, B256, Bytes};
+    use alloy_primitives::{Address, B256, Bytes, Log};
     use core::assert_matches;
 
     #[test]
@@ -492,5 +494,56 @@ mod tests {
         let interp = run(RunConfig::new(code).host(&mut host));
         assert_matches!(interp.err, InstrStop::InvalidOperandOOG);
         assert!(host.logs.is_empty());
+    }
+
+    const CHECKED_LOG2: u8 = 0x0c;
+
+    // Checks that the host already emitted the log `after_log` is handed, then reverts.
+    #[instruction(no_stack_preamble, dynamic_gas, EvmTypes = TestTypes)]
+    fn checked_log2(cx: _) -> Result {
+        let emitted = log_with(cx.gas, cx.state, stack, 2, |address, topics, data| {
+            Log::new_unchecked(*address, topics.to_vec(), Bytes::copy_from_slice(data))
+        })?;
+        assert_eq!(cx.state.host().logs, [emitted]);
+        Err(InstrStop::Revert)
+    }
+
+    struct CheckedLogConfig;
+
+    impl EvmConfig<TestTypes> for CheckedLogConfig {
+        const BASE_SPEC_ID: SpecId = SpecId::OSAKA;
+        const OPCODE_CONFIG: &'static OpcodeConfig<TestTypes> = &{
+            let mut config =
+                OpcodeConfig::<TestTypes>::base::<BaseEvmConfig<{ SpecId::OSAKA as u32 }>>();
+            config.set_instruction::<checked_log2>(CHECKED_LOG2, config.static_gas(op::LOG2));
+            config
+        };
+    }
+
+    #[test]
+    fn log_with_hands_the_emitted_log_to_after_log() {
+        let contract = Address::repeat_byte(0x11);
+        let mut code = Vec::new();
+        push(&mut code, 0xbeef);
+        push(&mut code, 0);
+        code.push(op::MSTORE);
+        push_all(&mut code, [Word::from(2), Word::from(1), Word::from(2), Word::from(30)]);
+        code.extend([CHECKED_LOG2, op::PUSH1, 1, op::STOP]);
+        let mut host = TestHost::default();
+
+        let interp = run_with::<CheckedLogConfig>(RunConfig::new(code).host(&mut host).message(
+            MessageExt { destination: contract, gas_limit: 10_000, ..Default::default() },
+        ));
+
+        assert_matches!(interp.err, InstrStop::Revert);
+        assert!(interp.stack().is_empty(), "the instruction's error stops execution");
+        assert_eq!(
+            host.logs,
+            [Log::new_unchecked(
+                contract,
+                Vec::from([B256::from(Word::from(1)), B256::from(Word::from(2))]),
+                Bytes::from_static(&[0xbe, 0xef]),
+            )]
+        );
     }
 }

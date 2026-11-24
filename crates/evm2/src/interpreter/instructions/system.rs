@@ -606,11 +606,10 @@ mod tests {
         constants::{CALL_DEPTH_LIMIT, MAX_INITCODE_SIZE},
         env::BlockEnvExt,
         evm::{AccountInfo, InMemoryDB},
-        interpreter::Interpreter,
         registry::TxRegistry,
         test_utils::{
             RunConfig, TestHost, TestInterpreter, TestTypes, create_code, legacy_bytecode, push,
-            push_all, return_top_word, run,
+            push_all, return_top_word, run, run_with,
         },
         utils::address_to_word,
         version::OpcodeConfig,
@@ -1154,6 +1153,7 @@ mod tests {
 
     const HOOKED_CALL: u8 = 0x0c;
     const HOOKED_CREATE: u8 = 0x0d;
+    const HOOKED_SELFDESTRUCT: u8 = 0x0e;
     const KEPT_GAS: u64 = 1_000;
     const AFTER_FEE: u64 = 7;
 
@@ -1193,6 +1193,16 @@ mod tests {
         )
     }
 
+    // Charges `AFTER_FEE` after a successful destruction.
+    #[instruction(dynamic_gas)]
+    fn hooked_selfdestruct(cx: _, [target]: [Word]) -> Result {
+        let result = selfdestruct_with(cx.gas, cx.state, target);
+        if matches!(result, Err(InstrStop::SelfDestruct)) {
+            cx.gas.spend(AFTER_FEE)?;
+        }
+        result
+    }
+
     struct HookedConfig;
 
     impl EvmConfig<TestTypes> for HookedConfig {
@@ -1208,22 +1218,15 @@ mod tests {
             HOOKED_CREATE,
             config.static_gas(op::CREATE),
         );
+        config.set_instruction::<hooked_selfdestruct<TestTypes>>(
+            HOOKED_SELFDESTRUCT,
+            config.static_gas(op::SELFDESTRUCT),
+        );
         config
     }
 
     fn run_hooked(config: RunConfig<'_>) -> TestInterpreter {
-        let RunConfig { code, host, tx_env, message, gas_limit, return_data, .. } = config;
-        let message = Message::<TestTypes> { code: legacy_bytecode(code), gas_limit, ..message };
-        let mut inner = Interpreter::<TestTypes>::new(&message);
-        *inner.return_data_mut() = return_data;
-        let mut default_host = TestHost::default();
-        let host = host.unwrap_or(&mut default_host);
-        host.tx_env = tx_env;
-        host.spec_id = SpecId::AMSTERDAM;
-        host.execution_config = ExecutionConfig::<TestTypes>::for_config::<HookedConfig>();
-        let err = inner.run(host).unwrap();
-        let (stack, stack_len, gas, memory, output) = inner.into_parts();
-        TestInterpreter { stack, stack_len, gas, memory, output, err, execution_error: None }
+        run_with::<HookedConfig>(config)
     }
 
     fn call_code(opcode: u8, value: u64) -> Vec<u8> {
@@ -1482,5 +1485,46 @@ mod tests {
             );
             assert_eq!(result, expected, "{target} {value} {call_gas} {gas_limit}");
         }
+    }
+
+    #[test]
+    fn selfdestruct_with_runs_custom_behavior_after_the_destruction() {
+        let contract = Address::repeat_byte(0x11);
+        let target = Address::repeat_byte(0x99);
+        let selfdestruct_code = |opcode| {
+            let mut code = Vec::new();
+            push(&mut code, address_to_word(&target));
+            code.push(opcode);
+            code
+        };
+        let message = MessageExt { destination: contract, gas_limit: 10_000, ..Default::default() };
+        let mut base_host = TestHost::default();
+        let base = run_hooked(
+            RunConfig::new(selfdestruct_code(op::SELFDESTRUCT))
+                .host(&mut base_host)
+                .message(message.clone()),
+        );
+        let mut host = TestHost::default();
+        let hooked = run_hooked(
+            RunConfig::new(selfdestruct_code(HOOKED_SELFDESTRUCT))
+                .host(&mut host)
+                .message(message.clone()),
+        );
+
+        assert_matches!(base.err, InstrStop::SelfDestruct);
+        assert_matches!(hooked.err, InstrStop::SelfDestruct);
+        assert_eq!(host.selfdestructs, base_host.selfdestructs);
+        assert_eq!(hooked.gas_remaining(), base.gas_remaining() - AFTER_FEE);
+        assert_eq!(hooked.gas_refunded(), base.gas_refunded());
+
+        // A failed destruction does not reach the custom behavior.
+        let mut host = TestHost::default();
+        let hooked = run_hooked(
+            RunConfig::new(selfdestruct_code(HOOKED_SELFDESTRUCT))
+                .host(&mut host)
+                .message(MessageExt { kind: MessageKind::StaticCall, ..message }),
+        );
+        assert_matches!(hooked.err, InstrStop::StateChangeDuringStaticCall);
+        assert!(host.selfdestructs.is_empty());
     }
 }

@@ -2598,14 +2598,7 @@ mod tests {
         for slot in [Word::ZERO, Word::ONE] {
             database.insert_account_storage(&HOOK_CALLER, &slot, &Word::from(7));
         }
-        let mut evm = Evm::<MessageHookTestTypes>::new_with_ext(
-            SpecId::OSAKA,
-            BlockEnvExt::default(),
-            TxRegistry::new(),
-            database,
-            precompile::NoPrecompiles::default(),
-            Vec::new(),
-        );
+        let mut evm = message_hook_evm(database, PrecompileMap::new());
         let mut message = MessageExt {
             destination: HOOK_CALLER,
             code: caller_code,
@@ -2639,6 +2632,108 @@ mod tests {
         else {
             panic!("unexpected hook calls: {events:?}");
         };
+    }
+
+    fn message_hook_evm(
+        database: InMemoryDB,
+        precompiles: PrecompileMap<MessageHookTestTypes>,
+    ) -> Evm<'static, MessageHookTestTypes> {
+        Evm::new_with_ext(
+            SpecId::OSAKA,
+            BlockEnvExt::default(),
+            TxRegistry::new(),
+            database,
+            Precompiles::new(Cow::Owned(precompiles)),
+            Vec::new(),
+        )
+    }
+
+    /// Asserts that the hooks saw exactly one message to [`HOOK_FAILED`], which ended with `stop`.
+    fn assert_one_failed_message(evm: &mut Evm<'_, MessageHookTestTypes>, stop: InstrStop) {
+        let events = core::mem::take(evm.ext_mut());
+        let [
+            HookEvent::Start { destination: HOOK_FAILED, .. },
+            HookEvent::End { destination: HOOK_FAILED, stop: end_stop },
+        ] = events.as_slice()
+        else {
+            panic!("unexpected hook calls: {events:?}");
+        };
+        assert_eq!(*end_stop, stop);
+    }
+
+    #[test]
+    fn message_end_hook_fails_a_create_and_clears_its_address() {
+        // Stores 1 at slot 1, then deploys one byte of code.
+        let initcode =
+            [op::PUSH1, 1, op::PUSH1, 1, op::SSTORE, op::PUSH1, 1, op::PUSH1, 0, op::RETURN];
+        let mut evm = message_hook_evm(InMemoryDB::default(), PrecompileMap::new());
+        let mut message = MessageExt {
+            kind: MessageKind::Create,
+            caller: HOOK_CALLER,
+            destination: HOOK_FAILED,
+            code: Bytecode::new_legacy(Bytes::copy_from_slice(&initcode)),
+            gas_limit: 200_000,
+            ..Default::default()
+        };
+
+        let result = Host::execute_message(&mut evm, &mut message).unwrap();
+
+        assert_eq!(result.stop, InstrStop::Revert);
+        assert_eq!(result.created_address, None);
+        assert!(result.output.is_empty());
+        assert_eq!(evm.state.storage_slot_untracked(&HOOK_FAILED, &Word::ONE).unwrap(), Word::ZERO);
+        let account = evm.state.account_info_untracked(&HOOK_FAILED).unwrap();
+        assert!(account.as_ref().is_none_or(AccountInfo::is_empty), "{account:?}");
+        assert_one_failed_message(&mut evm, InstrStop::Return);
+    }
+
+    #[test]
+    fn message_end_hook_fails_a_precompile_and_drops_its_output_and_logs() {
+        let precompile =
+            Precompile::new(HOOK_FAILED, PrecompileId::custom("logging"), |evm, _, _| {
+                evm.log(Log::new_unchecked(HOOK_FAILED, Vec::new(), Bytes::from_static(b"log")));
+                Ok(PrecompileOutput::new(Bytes::from_static(b"output")))
+            });
+        let mut evm =
+            message_hook_evm(InMemoryDB::default(), PrecompileMap::from_precompiles([precompile]));
+        let mut message = MessageExt {
+            destination: HOOK_FAILED,
+            call_target: HOOK_FAILED,
+            code_address: HOOK_FAILED,
+            gas_limit: 30_000,
+            ..Default::default()
+        };
+
+        let result = Host::execute_message(&mut evm, &mut message).unwrap();
+
+        assert_eq!(result.stop, InstrStop::Revert);
+        assert!(result.output.is_empty());
+        assert!(evm.logs().is_empty());
+        assert_one_failed_message(&mut evm, InstrStop::Return);
+    }
+
+    #[test]
+    fn message_end_hook_fails_a_value_call_to_an_empty_account() {
+        let mut database = InMemoryDB::default();
+        database
+            .insert_account_info(&HOOK_CALLER, AccountInfo::default().with_balance(Word::from(10)));
+        let mut evm = message_hook_evm(database, PrecompileMap::new());
+        let mut message = MessageExt {
+            caller: HOOK_CALLER,
+            destination: HOOK_FAILED,
+            call_target: HOOK_FAILED,
+            code_address: HOOK_FAILED,
+            value: Word::from(3),
+            gas_limit: 30_000,
+            ..Default::default()
+        };
+
+        let result = Host::execute_message(&mut evm, &mut message).unwrap();
+
+        assert_eq!(result.stop, InstrStop::Revert);
+        assert_eq!(evm.state.account(&HOOK_CALLER).unwrap().balance(), Word::from(10));
+        assert_eq!(evm.state.account(&HOOK_FAILED).unwrap().balance(), Word::ZERO);
+        assert_one_failed_message(&mut evm, InstrStop::Stop);
     }
 
     #[test]
