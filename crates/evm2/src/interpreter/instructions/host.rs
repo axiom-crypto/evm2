@@ -2,9 +2,7 @@ use super::require_non_staticcall;
 use crate::{
     EvmFeatures, EvmTypesHost,
     evm::SStore,
-    interpreter::{
-        Gas, Host, InstrStop, InterpreterState, Result, StackMut, Word, private::GasInstructionCx,
-    },
+    interpreter::{Gas, Host, InstrStop, InterpreterState, Result, StackMut, Word},
     utils::WordExt,
     version::GasId,
 };
@@ -45,7 +43,7 @@ pub fn sstore(cx: _, [key, value]: [Word]) -> Result {
 /// is charged. It receives the interpreter [`Gas`], the state, the destination address, and the
 /// [`SStore`] result of the write. It may charge gas through `Gas` or fail through
 /// [`InterpreterState::fail`] and return the error. An `Err` stops the instruction and skips the
-/// remaining charges. The JIT does not run the hook.
+/// remaining charges.
 #[inline(always)]
 pub fn sstore_with<T: EvmTypesHost>(
     gas: &mut Gas,
@@ -119,25 +117,33 @@ pub fn tstore(cx: _, [key, value]: [Word]) -> Result {
 
 #[instruction(no_stack_preamble, dynamic_gas)]
 pub fn log<const N: usize>(cx: _) -> Result {
-    log_common(cx, stack, N)
+    log_with(cx.gas, cx.state, stack, N, |_, _, _| ())
 }
 
+/// Executes `LOG0` through `LOG4` with `n` topics.
+///
+/// This is the body of [`log`], for custom `LOG` instructions. `on_log` receives the emitting
+/// address, the topics and the data before the host emits the log, and `log_with` returns its
+/// result. Work that needs the host or the interpreter state uses that result afterwards.
 #[inline(never)]
-fn log_common<T: EvmTypesHost>(
-    cx: GasInstructionCx<'_, '_, '_, T>,
+pub fn log_with<T: EvmTypesHost, R>(
+    gas: &mut Gas,
+    state: &mut InterpreterState<'_, '_, T>,
     mut stack: StackMut<'_>,
     n: usize,
-) -> Result {
-    require_non_staticcall(cx.state)?;
+    on_log: impl FnOnce(&Address, &[B256], &[u8]) -> R,
+) -> Result<R> {
+    assert!(n <= 4, "LOG takes at most four topics");
+    require_non_staticcall(state)?;
     let [offset, len] = stack.popn()?;
     let len = len.to_usize()?;
-    cx.gas.spend(cx.state.gas_params().log_cost(n as u8, len))?;
+    gas.spend(state.gas_params().log_cost(n as u8, len))?;
 
     let offset = if len == 0 {
         0
     } else {
         let offset = offset.to_usize()?;
-        cx.state.resize_memory(cx.gas, offset, len)?;
+        state.resize_memory(gas, offset, len)?;
         offset
     };
 
@@ -145,15 +151,15 @@ fn log_common<T: EvmTypesHost>(
     for (topic, word) in topics.iter_mut().zip(stack.popn_dyn(n)?) {
         *topic = B256::from(word);
     }
-    let destination = &cx.state.message().destination;
-    let (memory, host) = cx.state.0.memory_host();
-    // SAFETY: `log` is only dispatched for LOG0 through LOG4.
-    host.log(
-        destination,
-        unsafe { topics.get_unchecked(..n) }.into(),
-        memory.slice(offset, len).into(),
-    );
-    Ok(())
+    let destination = state.message().destination;
+    let (memory, host) = state.0.memory_host();
+    // SAFETY: `n` is at most four.
+    let topics = unsafe { topics.get_unchecked(..n) };
+    let data = memory.slice(offset, len);
+    // `on_log` runs before the host call, which can run inspector code that resizes this memory.
+    let value = on_log(&destination, topics, data);
+    host.log(&destination, topics.into(), data.into());
+    Ok(value)
 }
 
 #[cfg(test)]

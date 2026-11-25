@@ -489,31 +489,43 @@ pub fn create_with<T: EvmTypesHost>(
 
 #[instruction(dynamic_gas)]
 pub fn selfdestruct(cx: _, [target]: [Word]) -> Result {
-    require_non_staticcall(cx.state)?;
+    selfdestruct_with(cx.gas, cx.state, target)
+}
+
+/// Executes `SELFDESTRUCT` toward `target`.
+///
+/// This is the body of [`selfdestruct`], for custom `SELFDESTRUCT` instructions. Returns
+/// `Err(InstrStop::SelfDestruct)` on success.
+#[inline(always)]
+pub fn selfdestruct_with<T: EvmTypesHost>(
+    gas: &mut Gas,
+    state: &mut InterpreterState<'_, '_, T>,
+    target: &Word,
+) -> Result {
+    require_non_staticcall(state)?;
     let target = target.to_address();
-    let cold_load_gas = cx.state.gas_params().selfdestruct_cold_cost();
-    let skip_cold_load = cx.gas.remaining() < cold_load_gas;
-    let destination = &cx.state.message().destination;
-    let res = cx
-        .state
+    let cold_load_gas = state.gas_params().selfdestruct_cold_cost();
+    let skip_cold_load = gas.remaining() < cold_load_gas;
+    let destination = &state.message().destination;
+    let res = state
         .host()
         .selfdestruct(destination, &target, skip_cold_load)
-        .map_err(|error| cx.state.fail(error))?;
+        .map_err(|error| state.fail(error))?;
     let should_charge_topup = should_charge_new_account_gas(
-        cx.state.feature(EvmFeatures::EIP161),
+        state.feature(EvmFeatures::EIP161),
         res.had_value,
         res.target_is_empty,
     );
-    cx.gas.spend(cx.state.gas_params().selfdestruct_cost(should_charge_topup, res.is_cold))?;
+    gas.spend(state.gas_params().selfdestruct_cost(should_charge_topup, res.is_cold))?;
     // EIP-8037: sending balance to a new account via SELFDESTRUCT charges the
     // new-account state gas from the reservoir.
-    if should_charge_topup && cx.state.feature(EvmFeatures::EIP8037) {
-        cx.gas.spend_state(cx.state.gas_params().new_account_state_gas())?;
+    if should_charge_topup && state.feature(EvmFeatures::EIP8037) {
+        gas.spend_state(state.gas_params().new_account_state_gas())?;
     }
     if !res.previously_destroyed {
-        cx.gas.record_refund(cx.state.gas_params().get(GasId::SelfdestructRefund) as i64);
+        gas.record_refund(state.gas_params().get(GasId::SelfdestructRefund) as i64);
     }
-    cx.state.inspect_selfdestruct(destination, &target, &res.value);
+    state.inspect_selfdestruct(destination, &target, &res.value);
     Err(InstrStop::SelfDestruct)
 }
 

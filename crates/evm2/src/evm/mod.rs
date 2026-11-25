@@ -1541,6 +1541,20 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
                 HostError::Execution(error) => Err(error),
             };
         }
+        if let Some(result) = self.start_message(message, &checkpoint)? {
+            return Ok(result);
+        }
+        let result = self.run_create_message(message, checkpoint.clone())?;
+        self.end_message(message, checkpoint, result)
+    }
+
+    /// Runs a started create message: its initcode, then the code deposit.
+    #[inline(always)]
+    fn run_create_message(
+        &mut self,
+        message: &mut Message<T>,
+        checkpoint: StateCheckpoint,
+    ) -> Result<MessageResult<T>, ExecutionError> {
         // Empty initcode deploys an empty contract without executing the bytecode's padding STOP.
         let (stop, gas, output) = if message.code.is_empty() {
             (
@@ -1714,6 +1728,20 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
             }
             self.log_eip7708_transfer(&message.caller, &message.destination, &message.value);
         }
+        if let Some(result) = self.start_message(message, &checkpoint)? {
+            return Ok(result);
+        }
+        let result = self.run_call_message(message, checkpoint.clone())?;
+        self.end_message(message, checkpoint, result)
+    }
+
+    /// Runs a started call message: a precompile or the destination's code.
+    #[inline(always)]
+    fn run_call_message(
+        &mut self,
+        message: &mut Message<T>,
+        checkpoint: StateCheckpoint,
+    ) -> Result<MessageResult<T>, ExecutionError> {
         if self.contains_precompile(message) {
             return self.execute_call_precompile(checkpoint, message);
         }
@@ -1730,6 +1758,44 @@ impl<'a, T: EvmTypes> Evm<'a, T> {
         }
         let stop = self.run_frame(message, checkpoint.clone())?;
         Ok(self.finish_call_message_run(checkpoint, stop))
+    }
+
+    /// Applies [`EvmTypesHost::message_start`].
+    #[inline(always)]
+    fn start_message(
+        &mut self,
+        message: &Message<T>,
+        checkpoint: &StateCheckpoint,
+    ) -> Result<Option<MessageResult<T>>, ExecutionError> {
+        let Some(stop) = T::message_start(self, message, checkpoint)? else {
+            return Ok(None);
+        };
+        assert_hook_failure_stop("message_start", stop);
+        self.state.rollback(checkpoint.clone(), self.features);
+        let result = Self::error_message_result(stop, message.gas_limit, message.reservoir);
+        self.end_message(message, checkpoint.clone(), result).map(Some)
+    }
+
+    /// Applies [`EvmTypesHost::message_end`]. A replaced stop is settled again by
+    /// [`Self::execute_message_impl`].
+    #[inline(always)]
+    fn end_message(
+        &mut self,
+        message: &Message<T>,
+        checkpoint: StateCheckpoint,
+        mut result: MessageResult<T>,
+    ) -> Result<MessageResult<T>, ExecutionError> {
+        result.gas.settle_gas(result.stop);
+        let Some(stop) = T::message_end(self, message, &checkpoint, &result)? else {
+            return Ok(result);
+        };
+        assert!(result.stop.is_success(), "message_end failed a message that already failed");
+        assert_hook_failure_stop("message_end", stop);
+        self.state.rollback(checkpoint, self.features);
+        result.stop = stop;
+        result.output = Bytes::new();
+        result.created_address = None;
+        Ok(result)
     }
 
     #[inline(never)]
@@ -2251,6 +2317,15 @@ fn eip7708_transfer_log(from: &Address, to: &Address, value: &Word) -> Option<Lo
     ))
 }
 
+/// Checks that a message hook fails a message with a stop it is allowed to return.
+#[track_caller]
+fn assert_hook_failure_stop(hook: &str, stop: InstrStop) {
+    assert!(
+        !stop.is_success() && !matches!(stop, InstrStop::FatalExternalError | InstrStop::Reload),
+        "{hook} must fail a message with a revert or halt stop, not {stop:?}",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2295,6 +2370,135 @@ mod tests {
         type TxResultExt = ();
         type BlockEnvExt = ();
         type Host<'a> = Evm<'a, Self>;
+    }
+
+    const HOOK_CALLER: Address = Address::with_last_byte(0x61);
+    const HOOK_FAILED: Address = Address::with_last_byte(0x62);
+    const HOOK_REFUSED: Address = Address::with_last_byte(0x63);
+
+    /// Records message hook calls. `message_start` refuses every message to [`HOOK_REFUSED`] and
+    /// `message_end` fails every successful message to [`HOOK_FAILED`].
+    struct MessageHookTestTypes;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum HookEvent {
+        Start { destination: Address, checkpoint: usize, setup_writes: usize },
+        End { destination: Address, stop: InstrStop },
+    }
+
+    impl EvmTypesHost for MessageHookTestTypes {
+        type ConfigSelector = BaseEvmConfigSelector;
+        type SpecId = SpecId;
+        type Tx = ();
+        type EvmExt = Vec<HookEvent>;
+        type MessageExt = ();
+        type MessageResultExt = ();
+        type TxEnvExt = ();
+        type TxResultExt = ();
+        type BlockEnvExt = ();
+        type Host<'a> = Evm<'a, Self>;
+
+        fn message_start(
+            host: &mut Evm<'_, Self>,
+            message: &Message<Self>,
+            checkpoint: &StateCheckpoint,
+        ) -> Result<Option<InstrStop>, ExecutionError> {
+            let setup_writes = host.state().journal().len() - checkpoint.journal_len();
+            host.ext_mut().push(HookEvent::Start {
+                destination: message.destination,
+                checkpoint: checkpoint.journal_len(),
+                setup_writes,
+            });
+            Ok((message.destination == HOOK_REFUSED).then_some(InstrStop::Revert))
+        }
+
+        fn message_end(
+            host: &mut Evm<'_, Self>,
+            message: &Message<Self>,
+            _checkpoint: &StateCheckpoint,
+            result: &MessageResult<Self>,
+        ) -> Result<Option<InstrStop>, ExecutionError> {
+            host.ext_mut()
+                .push(HookEvent::End { destination: message.destination, stop: result.stop });
+            Ok((message.destination == HOOK_FAILED && result.stop.is_success())
+                .then_some(InstrStop::Revert))
+        }
+    }
+
+    /// Calls `target` with one wei and stores the call's success flag at `slot`.
+    fn call_and_store_result(code: &mut Vec<u8>, target: Address, slot: u8) {
+        code.extend([op::PUSH1, 0, op::PUSH1, 0, op::PUSH1, 0, op::PUSH1, 0, op::PUSH1, 1]);
+        code.push(op::PUSH20);
+        code.extend(target.as_slice());
+        code.extend([op::PUSH2, 0xff, 0xff, op::CALL, op::PUSH1, slot, op::SSTORE]);
+    }
+
+    #[test]
+    fn message_hooks_fail_messages_and_report_failure_to_their_caller() {
+        // Stores 1 at slot 1, then stops.
+        let child_code = [op::PUSH1, 1, op::PUSH1, 1, op::SSTORE, op::STOP];
+        let mut caller_code = Vec::new();
+        call_and_store_result(&mut caller_code, HOOK_FAILED, 0);
+        call_and_store_result(&mut caller_code, HOOK_REFUSED, 1);
+        caller_code.push(op::STOP);
+        let caller_code = Bytecode::new_legacy(Bytes::from(caller_code));
+
+        let mut database = InMemoryDB::default();
+        for child in [HOOK_FAILED, HOOK_REFUSED] {
+            database.insert_account_info(
+                &child,
+                AccountInfo::default()
+                    .with_code(Bytecode::new_legacy(Bytes::copy_from_slice(&child_code))),
+            );
+        }
+        database.insert_account_info(
+            &HOOK_CALLER,
+            AccountInfo::default().with_balance(Word::from(2)).with_code(caller_code.clone()),
+        );
+        for slot in [Word::ZERO, Word::ONE] {
+            database.insert_account_storage(&HOOK_CALLER, &slot, &Word::from(7));
+        }
+        let mut evm = Evm::<MessageHookTestTypes>::new_with_ext(
+            SpecId::OSAKA,
+            BlockEnvExt::default(),
+            TxRegistry::new(),
+            database,
+            precompile::NoPrecompiles::default(),
+            Vec::new(),
+        );
+        let mut message = MessageExt {
+            destination: HOOK_CALLER,
+            code: caller_code,
+            gas_limit: 200_000,
+            ..Default::default()
+        };
+
+        let result = Host::execute_message(&mut evm, &mut message).unwrap();
+
+        assert_eq!(result.stop, InstrStop::Stop);
+        for slot in [Word::ZERO, Word::ONE] {
+            assert_eq!(
+                evm.state.storage_slot_untracked(&HOOK_CALLER, &slot).unwrap(),
+                Word::ZERO,
+                "the caller observes call {slot} as failed",
+            );
+        }
+        for child in [HOOK_FAILED, HOOK_REFUSED] {
+            assert_eq!(evm.state.storage_slot_untracked(&child, &Word::ONE).unwrap(), Word::ZERO);
+            assert_eq!(evm.state.account(&child).unwrap().balance(), Word::ZERO);
+        }
+        let events = core::mem::take(evm.ext_mut());
+        let [
+            HookEvent::Start { destination: HOOK_CALLER, checkpoint: 0, .. },
+            HookEvent::Start { destination: HOOK_FAILED, setup_writes: 2, .. },
+            HookEvent::End { destination: HOOK_FAILED, stop: InstrStop::Stop },
+            HookEvent::Start { destination: HOOK_REFUSED, setup_writes: 2, .. },
+            HookEvent::End { destination: HOOK_REFUSED, stop: InstrStop::Revert },
+            HookEvent::End { destination: HOOK_CALLER, stop: InstrStop::Stop },
+        ] = events.as_slice()
+        else {
+            panic!("unexpected hook calls: {events:?}");
+        };
     }
 
     #[test]

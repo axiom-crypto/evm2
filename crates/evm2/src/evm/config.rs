@@ -1,10 +1,11 @@
 //! EVM configuration.
 
 use crate::{
-    Evm, OpcodeConfig, OpcodeView, SpecId,
+    Evm, ExecutionError, OpcodeConfig, OpcodeView, SpecId,
     ethereum::TxEnvelope,
+    evm::StateCheckpoint,
     interpreter::{
-        Host,
+        Host, InstrStop, Message, MessageResult,
         dispatch::{ConfigInstrTables, InstrTable, SelectorInstrTables},
     },
     version::Version,
@@ -51,6 +52,41 @@ pub trait EvmTypesHost: Sized + 'static {
 
     /// Host type used by this EVM.
     type Host<'a>: Host<Self> + ?Sized;
+
+    /// Called once a message's value transfer or account creation is done, right before its code
+    /// or precompile runs. Journal entries before `checkpoint` belong to the caller.
+    ///
+    /// Returning `Some(stop)` fails the message without running it and rolls its state back to
+    /// `checkpoint`; [`Self::message_end`] still runs. `stop` must be a revert or a halt other
+    /// than [`InstrStop::FatalExternalError`]; return an [`ExecutionError`] to abort instead.
+    ///
+    /// Not called for a message that fails before or during setup, or is replaced by a halted
+    /// result.
+    #[inline(always)]
+    fn message_start(
+        _host: &mut Self::Host<'_>,
+        _message: &Message<Self>,
+        _checkpoint: &StateCheckpoint,
+    ) -> Result<Option<InstrStop>, ExecutionError> {
+        Ok(None)
+    }
+
+    /// Called with the final result of a message that ran [`Self::message_start`], before the
+    /// inspector's `call_end` or `create_end`. Not called if executing the message, or
+    /// [`Self::message_start`], returns an [`ExecutionError`].
+    ///
+    /// Returning `Some(stop)` fails a successful message, rolling its state back to `checkpoint`
+    /// and clearing its output. `stop` follows the rules of [`Self::message_start`]. Must return
+    /// `None` for a message that already failed.
+    #[inline(always)]
+    fn message_end(
+        _host: &mut Self::Host<'_>,
+        _message: &Message<Self>,
+        _checkpoint: &StateCheckpoint,
+        _result: &MessageResult<Self>,
+    ) -> Result<Option<InstrStop>, ExecutionError> {
+        Ok(None)
+    }
 }
 
 /// Runtime EVM type family whose host is [`Evm`] for every stored-object lifetime.
