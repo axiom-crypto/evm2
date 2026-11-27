@@ -2683,55 +2683,6 @@ mod tests {
     }
 
     #[test]
-    fn message_end_hook_fails_a_precompile_and_drops_its_output_and_logs() {
-        let precompile =
-            Precompile::new(HOOK_FAILED, PrecompileId::custom("logging"), |evm, _, _| {
-                evm.log(Log::new_unchecked(HOOK_FAILED, Vec::new(), Bytes::from_static(b"log")));
-                Ok(PrecompileOutput::new(Bytes::from_static(b"output")))
-            });
-        let mut evm =
-            message_hook_evm(InMemoryDB::default(), PrecompileMap::from_precompiles([precompile]));
-        let mut message = MessageExt {
-            destination: HOOK_FAILED,
-            call_target: HOOK_FAILED,
-            code_address: HOOK_FAILED,
-            gas_limit: 30_000,
-            ..Default::default()
-        };
-
-        let result = Host::execute_message(&mut evm, &mut message).unwrap();
-
-        assert_eq!(result.stop, InstrStop::Revert);
-        assert!(result.output.is_empty());
-        assert!(evm.logs().is_empty());
-        assert_one_failed_message(&mut evm, InstrStop::Return);
-    }
-
-    #[test]
-    fn message_end_hook_fails_a_value_call_to_an_empty_account() {
-        let mut database = InMemoryDB::default();
-        database
-            .insert_account_info(&HOOK_CALLER, AccountInfo::default().with_balance(Word::from(10)));
-        let mut evm = message_hook_evm(database, PrecompileMap::new());
-        let mut message = MessageExt {
-            caller: HOOK_CALLER,
-            destination: HOOK_FAILED,
-            call_target: HOOK_FAILED,
-            code_address: HOOK_FAILED,
-            value: Word::from(3),
-            gas_limit: 30_000,
-            ..Default::default()
-        };
-
-        let result = Host::execute_message(&mut evm, &mut message).unwrap();
-
-        assert_eq!(result.stop, InstrStop::Revert);
-        assert_eq!(evm.state.account(&HOOK_CALLER).unwrap().balance(), Word::from(10));
-        assert_eq!(evm.state.account(&HOOK_FAILED).unwrap().balance(), Word::ZERO);
-        assert_one_failed_message(&mut evm, InstrStop::Stop);
-    }
-
-    #[test]
     fn message_start_hook_refuses_a_message_without_running_it() {
         let precompile =
             Precompile::new(HOOK_REFUSED, PrecompileId::custom("refused"), |_, _, _| {

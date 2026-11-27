@@ -492,7 +492,7 @@ mod tests {
 
     const CHECKED_LOG2: u8 = 0x0c;
 
-    // Checks that the host already emitted the log `after_log` is handed, then reverts.
+    // Checks that `on_log`'s value matches the log the host emitted, then reverts.
     #[instruction(no_stack_preamble, dynamic_gas, EvmTypes = TestTypes)]
     fn checked_log2(cx: _) -> Result {
         let emitted = log_with(cx.gas, cx.state, stack, 2, |address, topics, data| {
@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn log_with_hands_the_emitted_log_to_after_log() {
+    fn log_with_returns_the_on_log_value_for_the_emitted_log() {
         let contract = Address::repeat_byte(0x11);
         let mut code = Vec::new();
         push(&mut code, 0xbeef);
